@@ -128,10 +128,12 @@ CRITICAL RULES:
 
 def get_gspread_client():
     """Authenticates using the local JSON files instead of MongoDB variables."""
-    return gspread.oauth(
+    # Extract only the client from the returned tuple
+    client, authorized_user = gspread.oauth(
         credentials_filename="client_secret.json",
         authorized_user_filename="token.json"
     )
+    return client
 
 def append_transaction_row(ws, credit_or_debit: str, category: str, amount: float, comments: str = ""):
     now = datetime.now()

@@ -17,7 +17,13 @@ def get_sheet_client():
     """Authenticates using Streamlit Secrets instead of missing local files."""
     creds_dict = json.loads(st.secrets["GOOGLE_CLIENT_JSON"])
     token_dict = json.loads(st.secrets["GOOGLE_TOKEN_JSON"])
-    return gspread.oauth_from_dict(credentials=creds_dict, authorized_user_info=token_dict)
+    
+    # Extract only the client from the returned tuple
+    client, authorized_user = gspread.oauth_from_dict(
+        credentials=creds_dict, 
+        authorized_user_info=token_dict
+    )
+    return client
 
 try:
     gc = get_sheet_client()
