@@ -4,21 +4,12 @@ import streamlit as st
 import pandas as pd
 import gspread
 from streamlit_autorefresh import st_autorefresh
-from database import get_user_by_phone
 
 # 1. Page Configuration & Auto-Refresh
 st.set_page_config(page_title="Zaikeban Foods Hisab", page_icon="🍽️", layout="wide")
 st_autorefresh(interval=5000, key="data_refresh") # Refreshes every 5 seconds
 
 st.title("🍽️ Zaikeban Foods Live Analytics")
-
-# 2. Authenticate using the Admin's Phone Number (Set this in your .env)
-ADMIN_PHONE = os.getenv("ADMIN_PHONE", "YOUR_PHONE_NUMBER_HERE")
-user = get_user_by_phone(ADMIN_PHONE)
-
-if not user or "access_token" not in user:
-    st.warning("⚠️ Authentication missing. Please message the bot '/login' on WhatsApp first.")
-    st.stop()
 
 # 3. Connect to Google Sheets
 @st.cache_resource(ttl=300)
