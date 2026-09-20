@@ -2,7 +2,6 @@ import os
 import streamlit as st
 import pandas as pd
 import gspread
-from google.oauth2.credentials import Credentials
 from streamlit_autorefresh import st_autorefresh
 from database import get_user_by_phone
 
@@ -23,15 +22,11 @@ if not user or "access_token" not in user:
 # 3. Connect to Google Sheets
 @st.cache_resource(ttl=300)
 def get_sheet_client():
-    creds = Credentials(
-        token=user.get("access_token"),
-        refresh_token=user.get("refresh_token"),
-        token_uri="https://oauth2.googleapis.com/token",
-        client_id=os.getenv("GOOGLE_CLIENT_ID"),
-        client_secret=os.getenv("GOOGLE_CLIENT_SECRET"),
-        scopes=["https://www.googleapis.com/auth/spreadsheets"]
+    """Authenticates using the local JSON files."""
+    return gspread.oauth(
+        credentials_filename="client_secret.json",
+        authorized_user_filename="token.json"
     )
-    return gspread.authorize(creds)
 
 try:
     gc = get_sheet_client()

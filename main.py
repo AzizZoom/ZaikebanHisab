@@ -1,4 +1,4 @@
-/import os
+import os
 import re
 import json
 import logging
@@ -8,7 +8,6 @@ from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, Form, Response, Request
 from twilio.twiml.messaging_response import MessagingResponse
 import gspread
-from google.oauth2.credentials import Credentials
 import google.generativeai as genai
 
 from database import get_user_by_phone, update_user_tokens
@@ -127,16 +126,12 @@ CRITICAL RULES:
 - Convert any kg inputs to grams (e.g., 2kg = 2000).
 """
 
-def get_gspread_client(user: dict):
-    creds = Credentials(
-        token=user.get("access_token"),
-        refresh_token=user.get("refresh_token"),
-        token_uri="https://oauth2.googleapis.com/token",
-        client_id=os.getenv("GOOGLE_CLIENT_ID"),
-        client_secret=os.getenv("GOOGLE_CLIENT_SECRET"),
-        scopes=["https://www.googleapis.com/auth/spreadsheets"]
+def get_gspread_client():
+    """Authenticates using the local JSON files instead of MongoDB variables."""
+    return gspread.oauth(
+        credentials_filename="client_secret.json",
+        authorized_user_filename="token.json"
     )
-    return gspread.authorize(creds)
 
 def append_transaction_row(ws, credit_or_debit: str, category: str, amount: float, comments: str = ""):
     now = datetime.now()
@@ -189,7 +184,7 @@ async def whatsapp_webhook(
         clean_text = re.sub(r"```(json)?", "", response.text).strip()
         operations = json.loads(clean_text)
 
-        gc = get_gspread_client(user)
+        gc = get_gspread_client()
         sh = gc.open(SPREADSHEET_NAME)
         
         reply_lines = []
