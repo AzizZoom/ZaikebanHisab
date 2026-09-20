@@ -1,3 +1,4 @@
+import json
 import os
 import streamlit as st
 import pandas as pd
@@ -22,11 +23,10 @@ if not user or "access_token" not in user:
 # 3. Connect to Google Sheets
 @st.cache_resource(ttl=300)
 def get_sheet_client():
-    """Authenticates using the local JSON files."""
-    return gspread.oauth(
-        credentials_filename="client_secret.json",
-        authorized_user_filename="token.json"
-    )
+    """Authenticates using Streamlit Secrets instead of missing local files."""
+    creds_dict = json.loads(st.secrets["GOOGLE_CLIENT_JSON"])
+    token_dict = json.loads(st.secrets["GOOGLE_TOKEN_JSON"])
+    return gspread.oauth_from_dict(credentials=creds_dict, authorized_user_info=token_dict)
 
 try:
     gc = get_sheet_client()
