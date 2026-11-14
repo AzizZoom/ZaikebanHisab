@@ -43,8 +43,8 @@ def book_for(user):
  gc=get_user_client(user)
  try:return gc.open(user.get("sheet_id") or os.getenv("SPREADSHEET_NAME","Zaikeban Foods Hisab"))
  except gspread.SpreadsheetNotFound:return database.initialize_user_sheet(gc,user["email"])
-@app.get("/",response_class=HTMLResponse)
-async def home(request:Request):return templates.TemplateResponse("index.html",{"request":request})
+@app.api_route("/",methods=["GET","HEAD"],response_class=HTMLResponse)
+async def home(request:Request):return templates.TemplateResponse(request=request,name="index.html")
 @app.get("/login")
 async def login(request:Request):
  uri=f"{request.headers.get('x-forwarded-proto','http')}://{request.headers.get('host')}/callback"; flow=build_oauth_flow(uri); url,state=flow.authorization_url(access_type="offline",prompt="consent"); request.session.update(state=state,code_verifier=flow.code_verifier,redirect_uri=uri); return RedirectResponse(url)
