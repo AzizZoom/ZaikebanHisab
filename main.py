@@ -69,6 +69,15 @@ def ws(book,tab):return book.worksheet(tab)
 def stock_get(book):
  r=ws(book,"Mukhwas").row_values(2);return {f:int(float(r[i] or 0)) if i<len(r) else 0 for i,f in enumerate(FLAVOURS)}
 def stock_set(book,s):ws(book,"Mukhwas").update("A2:E2",[[str(s[f]) for f in FLAVOURS]])
+def stock_alerts(stock):
+ alerts=[]
+ for flavour,grams in stock.items():
+  if grams<400:alerts.append(f"🔴 RED ALERT: {flavour} stock is critically low ({grams}g left!)")
+  elif grams<1000:alerts.append(f"🟡 YELLOW ALERT: {flavour} stock is low ({grams}g left)")
+ return "\n".join(alerts)
+def with_stock_alerts(reply,stock):
+ alerts=stock_alerts(stock)
+ return f"{reply}\n{alerts}" if alerts else reply
 def ledger(book,mode,kind,category,amount,comment=""):
  if mode not in ("Bank","Cash"):mode="Bank" if str(mode).lower() in ("upi","gpay") else "Cash"
  sh=ws(book,mode);n=len(sh.get_all_values())+1;now=datetime.now();amt=abs(float(amount));final=amt if kind=="Credit" else -amt;formula=f"=G{n}" if n<=3 else f"=H{n-1}+G{n}"
@@ -94,22 +103,24 @@ def act(book,a):
   stock_set(book,s);n=datetime.now();ws(book,"Orders").append_row([n.year,n.strftime("%b"),n.day,a.get("name",""),a.get("area",""),float(a.get("amount",0)),a.get("source","WhatsApp"),a.get("payment_status","Pending"),a.get("order_status","Pending"),", ".join(details)],value_input_option="USER_ENTERED")
   amt=float(a.get("amount",0))
   if a.get("payment_status")=="Done" and amt>0:ledger(book,a.get("payment_mode","Cash"),"Credit","Order",amt,"Order from "+a.get("name",""))
-  return "Order saved. Live stock: "+", ".join(f"{f} {max(0,s[f])}g" for f in FLAVOURS)
+  return with_stock_alerts("Order saved. Live stock: "+", ".join(f"{f} {max(0,s[f])}g" for f in FLAVOURS),s)
  if k=="STOCK_ADD":
   s=stock_get(book)
   for it in a.get("items",[]):
    f=it.get("flavour","").upper();g=int(it.get("grams",0))
    if f not in FLAVOURS or g<=0:raise ValueError("Invalid stock item")
    s[f]+=g
-  stock_set(book,s);return "Stock: "+", ".join(f"{f} {v}g" for f,v in s.items())
+  stock_set(book,s);return with_stock_alerts("Stock: "+", ".join(f"{f} {v}g" for f,v in s.items()),s)
  if k in ("EXPENSE","INCOME"):ledger(book,a.get("mode","Cash"),"Debit" if k=="EXPENSE" else "Credit",a.get("category",k),a["amount"],a.get("comments",""));return f"{k.title()} ₹{float(a['amount']):,.2f} saved."
  if k=="QUERY_LIVE":
   t=a.get("target","All");out=[]
   if t in ("Bank","Both","All"):out.append(f"Bank ₹{live(book,'Bank'):,.2f}")
   if t in ("Cash","Both","All"):out.append(f"Cash ₹{live(book,'Cash'):,.2f}")
+  s=None
   if t in ("Stock","All"):
    s=stock_get(book);f=a.get("flavour","ALL").upper();out.append("Stock "+", ".join(f"{x}: {v}g" for x,v in s.items() if f in ("ALL",x)))
-  return " | ".join(out)
+  reply=" | ".join(out)
+  return with_stock_alerts(reply,s) if s is not None else reply
  if k=="FETCH_PENDING":
   f=a.get("filter","Both");found=[]
   for r in rows(book,"Orders"):
@@ -128,7 +139,8 @@ def act(book,a):
    for g,f in re.findall(r"(\d+)\s*g\s+(CC|SD|KD|RS|MP)",r.get("Order details",""),re.I):sold[f.upper()]+=int(g)
   o.append(f"{len(orders)} orders, value ₹{sum(money(r) for r in orders):,.2f}")
   for t,rs in tx.items():o.append(f"{t}: income ₹{sum(money(r) for r in rs if r.get('Credit/Debit')=='Credit'):,.2f}; expense ₹{sum(money(r) for r in rs if r.get('Credit/Debit')=='Debit'):,.2f}")
-  o.append("Sold: "+", ".join(f"{f} {n}g" for f,n in sold.items())+f" (total {sum(sold.values())}g). Stock: "+", ".join(f"{f} {v}g" for f,v in stock_get(book).items()));return "\n".join(o)
+  current_stock=stock_get(book)
+  o.append("Sold: "+", ".join(f"{f} {n}g" for f,n in sold.items())+f" (total {sum(sold.values())}g). Stock: "+", ".join(f"{f} {v}g" for f,v in current_stock.items()));return with_stock_alerts("\n".join(o),current_stock)
  if k=="UPDATE_ORDER_STATUS":
   sh=ws(book,"Orders");v=sh.get_all_values();count=0
   for i,r in enumerate(v[1:],2):

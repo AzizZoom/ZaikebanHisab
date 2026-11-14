@@ -89,7 +89,20 @@ try:
  with st.container(key="kpi_metrics"):
   a,b,c,d=st.columns(4);a.metric("Live Bank Balance",f"₹{live('Bank'):,.2f}");b.metric("Live Cash Balance",f"₹{live('Cash'):,.2f}");c.metric("Pending Payments",f"{len(payments)} · ₹{pending_sum:,.2f}");d.metric("Pending Deliveries",len(deliveries))
  st.subheader("Mukhwas Stock");raw=book.worksheet("Mukhwas").row_values(2);stock=pd.DataFrame({"Flavour":["CC","SD","KD","RS","MP"],"Live grams":[int(num(raw[i])) if i<len(raw) else 0 for i in range(5)]})
- x,y=st.columns([1.4,1]);x.plotly_chart(px.bar(stock,x="Flavour",y="Live grams",color="Flavour",text="Live grams",title="Current stock in grams"),use_container_width=True,config={"displayModeBar":False});y.dataframe(stock,use_container_width=True,hide_index=True)
+ color_map={"CC":"#800000","SD":"#0068c9","KD":"#4B0082","RS":"#ffabab","MP":"#1B5E20"}
+ full_names={"CC":"Caramel Crunch","SD":"Savoury Delight","KD":"Kharak Delight","RS":"Roasted Seed Mix","MP":"Meetha Paan"}
+ def stock_status(grams):
+  if grams<400:return "🔴 Critical (<400g)"
+  if grams<1000:return "🟡 Low (<1000g)"
+  return "🟢 Healthy"
+ stock["Status"]=stock["Live grams"].map(stock_status)
+ low_stock=stock[stock["Live grams"]<1000]
+ if not low_stock.empty:
+  st.warning("Low stock alert: "+" · ".join(f"{row.Flavour}: {row['Live grams']}g ({row.Status})" for _,row in low_stock.iterrows()))
+ chart_col,table_col=st.columns([1.4,1])
+ chart_col.plotly_chart(px.bar(stock,x="Flavour",y="Live grams",color="Flavour",text="Live grams",title="Current stock in grams",color_discrete_map=color_map,category_orders={"Flavour":["CC","SD","KD","RS","MP"]}),use_container_width=True,config={"displayModeBar":False})
+ table=stock.rename(columns={"Flavour":"Flavour Code"}).copy();table["Flavour Code"]=table["Flavour Code"].map(full_names)
+ table_col.dataframe(table,use_container_width=True,hide_index=True)
  st.subheader("Pending Action Center")
  pending=pd.concat([payments.assign(Action="Payment pending"),deliveries.assign(Action="Delivery pending")]).drop_duplicates() if len(payments) or len(deliveries) else pd.DataFrame()
  if pending.empty:st.success("No pending actions.")
