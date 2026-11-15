@@ -1,27 +1,58 @@
 """FastAPI OAuth and WhatsApp ERP assistant."""
-import json, os, re
+import json, os, re, logging
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 from io import BytesIO
+from typing import Optional
 import gspread, requests
 import google.generativeai as genai
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Form, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, PlainTextResponse
 from fastapi.templating import Jinja2Templates
 from google.auth.transport.requests import Request as GoogleRequest
 from google_auth_oauthlib.flow import Flow
 from google.oauth2.credentials import Credentials
 from PIL import Image
 from starlette.middleware.sessions import SessionMiddleware
-from twilio.twiml.messaging_response import MessagingResponse
 import database
 
 load_dotenv(); os.environ["OAUTHLIB_INSECURE_TRANSPORT"]="1"
+WHATSAPP_TOKEN=os.getenv("WHATSAPP_TOKEN","")
+WHATSAPP_PHONE_NUMBER_ID=os.getenv("WHATSAPP_PHONE_NUMBER_ID","")
+WHATSAPP_VERIFY_TOKEN=os.getenv("WHATSAPP_VERIFY_TOKEN","zaikeban_verify_token")
+GRAPH_API_VERSION=os.getenv("GRAPH_API_VERSION","v21.0")
+logger=logging.getLogger(__name__)
+PROCESSED_MESSAGE_IDS=deque(maxlen=200)
 SCOPES=["https://www.googleapis.com/auth/spreadsheets","https://www.googleapis.com/auth/drive.file","https://www.googleapis.com/auth/userinfo.email","openid"]
 app=FastAPI(title="Zaikeban Foods Hisab")
 app.add_middleware(SessionMiddleware,secret_key=os.getenv("SESSION_SECRET","change-me"))
 templates=Jinja2Templates(directory=str(Path(__file__).parent/"templates")); FLAVOURS=["CC","SD","KD","RS","MP"]
+
+def send_whatsapp_message(to_number: str, text: str):
+ clean_to=re.sub(r"\D","",str(to_number or "").replace("whatsapp:",""))
+ url=f"https://graph.facebook.com/{GRAPH_API_VERSION}/{WHATSAPP_PHONE_NUMBER_ID}/messages"
+ try:
+  response=requests.post(url,headers={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"},json={"messaging_product":"whatsapp","recipient_type":"individual","to":clean_to,"type":"text","text":{"preview_url":False,"body":text}},timeout=15)
+  if response.status_code!=200:logger.error("WhatsApp Cloud API returned %s: %s",response.status_code,response.text)
+  return response
+ except requests.RequestException:
+  logger.exception("Failed to send WhatsApp Cloud API message")
+  return None
+
+def download_whatsapp_media(media_id: str) -> Optional[Image.Image]:
+ if not media_id:return None
+ headers={"Authorization":f"Bearer {WHATSAPP_TOKEN}"}
+ try:
+  metadata=requests.get(f"https://graph.facebook.com/{GRAPH_API_VERSION}/{media_id}",headers=headers,timeout=15)
+  metadata.raise_for_status();media_url=metadata.json().get("url")
+  if not media_url:return None
+  response=requests.get(media_url,headers=headers,timeout=20);response.raise_for_status()
+  return Image.open(BytesIO(response.content)).convert("RGB")
+ except Exception:
+  logger.exception("Failed to download WhatsApp media %s",media_id)
+  return None
 CARD_STYLE="""<style>*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;background:linear-gradient(135deg,#fff8ed,#f1f7eb);font:16px system-ui,-apple-system,'Segoe UI',sans-serif;color:#233026}.card{width:min(100%,520px);padding:48px;border-radius:24px;background:#fff;box-shadow:0 18px 60px #263b2518;text-align:center}.leaf{font-size:2.5rem}h1{font-size:2.2rem;margin:.2em 0;color:#244b35}p{color:#667268;line-height:1.6}label{display:block;text-align:left;margin:18px 0 6px;color:#33443a;font-weight:600}input{width:100%;padding:14px;border:1px solid #dce5dc;border-radius:10px;font:inherit}.btn{display:inline-block;width:100%;margin-top:18px;padding:14px 24px;border:0;border-radius:12px;background:#2e7049;color:white;text-decoration:none;font:700 16px system-ui;cursor:pointer}.btn:hover{background:#245d3b}</style>"""
 SYSTEM_PROMPT='''Parse English, Hindi and Hinglish business messages/images. Return ONLY JSON array. Actions: ORDER {name,area,amount,source,payment_status,payment_mode,order_status,items:[{flavour,grams}]}; STOCK_ADD {items:[{flavour,grams}],comments}; EXPENSE/INCOME {mode,category,amount,comments}; QUERY_LIVE {target,flavour}; REPORT_OVERVIEW {days}; FETCH_PENDING {filter}; UPDATE_ORDER_STATUS {name,payment_status,payment_mode,order_status}. Valid flavours CC SD KD RS MP. Convert kg to grams. Never invent missing data; return [] if unclear.''' 
 MODEL=None
@@ -152,21 +183,71 @@ def act(book,a):
   return f"Updated {count} order(s)." if count else "No matching pending order."
  return "Unsupported action."
 
+@app.get("/whatsapp")
+async def verify_whatsapp(request:Request):
+ mode=request.query_params.get("hub.mode")
+ token=request.query_params.get("hub.verify_token")
+ challenge=request.query_params.get("hub.challenge")
+ if mode=="subscribe" and token==WHATSAPP_VERIFY_TOKEN and challenge is not None:
+  return PlainTextResponse(content=str(challenge),status_code=200)
+ return PlainTextResponse(content="Verification failed",status_code=403)
+
 @app.post("/whatsapp")
 async def whatsapp(request:Request):
- form=await request.form();sender=str(form.get("From",""));resp=MessagingResponse();user=database.get_user_by_phone(sender)
- if not user:resp.message("Number not linked. Please connect it in the web app.");return Response(str(resp),media_type="application/xml")
- if MODEL is None:resp.message("AI is not configured.");return Response(str(resp),media_type="application/xml")
- try:
-  parts=[SYSTEM_PROMPT+"\n"+str(form.get("Body",""))]
-  if int(form.get("NumMedia",0))>0:
-   r=requests.get(form["MediaUrl0"],auth=(os.getenv("TWILIO_SID",""),os.getenv("TWILIO_AUTH","")),timeout=20);r.raise_for_status();parts.append(Image.open(BytesIO(r.content)).convert("RGB"))
-  raw=MODEL.generate_content(parts).text.strip();raw=re.sub(r"^```(?:json)?|```$","",raw,flags=re.I|re.M).strip();actions=json.loads(raw)
-  if not isinstance(actions,list):raise ValueError("Expected action array")
-  b=book_for(user);out=[]
-  for a in actions:
-   try:out.append(act(b,a))
-   except Exception as e:out.append(f"Could not process action: {e}")
-  resp.message("\n\n".join(out) if out else "Please clarify the request.")
- except Exception:resp.message("Sorry, couldn't process that. Please try again with clear details.")
- return Response(str(resp),media_type="application/xml")
+ try:payload=await request.json()
+ except Exception:return JSONResponse({"status":"ignored"},status_code=200)
+ messages=[]
+ for entry in (payload.get("entry") or []) if isinstance(payload,dict) else []:
+  for change in (entry.get("changes") or []) if isinstance(entry,dict) else []:
+   value=change.get("value",{}) if isinstance(change,dict) else {}
+   if isinstance(value,dict):messages.extend(value.get("messages",[]) or [])
+ if not messages:return JSONResponse({"status":"ignored"},status_code=200)
+
+ processed=0
+ admin_digits=re.sub(r"\D","",os.getenv("ADMIN_PHONE",""))[-10:]
+ for msg in messages:
+  if not isinstance(msg,dict):continue
+  message_id=msg.get("id")
+  if message_id and message_id in PROCESSED_MESSAGE_IDS:continue
+  if message_id:PROCESSED_MESSAGE_IDS.append(message_id)
+  processed+=1
+  sender=str(msg.get("from",""))
+  if not sender:continue
+  user=database.get_user_by_phone(sender)
+  sender_digits=re.sub(r"\D","",sender)
+  if user is None and admin_digits and sender_digits[-10:]==admin_digits:
+   user=database.get_any_authenticated_user()
+  if user is None:
+   final_reply="Number not linked. Please connect it in the web app."
+   send_whatsapp_message(sender,final_reply)
+   continue
+  if MODEL is None:
+   send_whatsapp_message(sender,"AI is not configured.")
+   continue
+  try:
+   msg_type=msg.get("type")
+   image=None
+   if msg_type=="text":
+    body=msg.get("text",{}).get("body","")
+   elif msg_type=="image":
+    body=msg.get("image",{}).get("caption","")
+    image=download_whatsapp_media(msg.get("image",{}).get("id"))
+   else:
+    body=""
+   parts=[SYSTEM_PROMPT+"\n"+body]
+   if image is not None:parts.append(image)
+   raw=MODEL.generate_content(parts).text.strip()
+   raw=re.sub(r"^```(?:json)?|```$","",raw,flags=re.I|re.M).strip()
+   actions=json.loads(raw)
+   if not isinstance(actions,list):raise ValueError("Expected action array")
+   book=book_for(user);out=[]
+   for action in actions:
+    try:out.append(act(book,action))
+    except Exception as exc:out.append(f"Could not process action: {exc}")
+   final_reply="\n\n".join(out) if out else "Please clarify the request."
+  except Exception:
+   logger.exception("Failed to process incoming WhatsApp message")
+   final_reply="Sorry, couldn't process that. Please try again with clear details."
+  send_whatsapp_message(sender,final_reply)
+ if processed==0:return JSONResponse({"status":"ignored"},status_code=200)
+ return JSONResponse({"status":"ok"},status_code=200)

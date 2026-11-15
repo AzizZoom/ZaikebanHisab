@@ -6,7 +6,6 @@ gspread
 google-auth
 google-auth-oauthlib
 google-generativeai
-twilio
 python-dotenv
 itsdangerous
 jinja2
