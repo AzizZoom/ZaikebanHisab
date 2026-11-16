@@ -6,7 +6,7 @@ from pathlib import Path
 from io import BytesIO
 from typing import Optional
 import gspread, requests
-import google.generativeai as genai
+from google import genai
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Form, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, PlainTextResponse
@@ -81,27 +81,20 @@ Set "payment_mode" or "mode" to "Bank" ONLY if the user explicitly mentions bank
 
 Always fill omitted optional fields using the defaults above instead of returning []. Only return [] if the message is completely unrelated to orders, stock, income, expenses, or business queries.'''
 
-if os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"):
- genai.configure(api_key=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"))
-GEMINI_MODEL_NAMES=["models/gemini-2.5-flash","models/gemini-2.5-flash-lite","models/gemini-2.0-flash"]
-_GEMINI_MODELS={}
+GEMINI_MODEL_NAMES=["gemini-2.5-flash","gemini-2.5-flash-lite","gemini-2.0-flash"]
 
 def generate_ai_response(parts) -> str:
- api_key=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+ api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
  if not api_key:raise RuntimeError("Gemini API key is not configured")
- genai.configure(api_key=api_key)
- last_error=None
+ client = genai.Client(api_key=api_key)
+ last_error = None
  for model_name in GEMINI_MODEL_NAMES:
   try:
-   model=_GEMINI_MODELS.get(model_name)
-   if model is None:
-    model=genai.GenerativeModel(model_name)
-    _GEMINI_MODELS[model_name]=model
-   response=model.generate_content(parts)
+   response = client.models.generate_content(model=model_name, contents=parts)
    return str(response.text or "")
   except Exception as exc:
-   last_error=exc
-   logger.warning("Gemini model %s failed; trying fallback: %s",model_name,exc)
+   last_error = exc
+   logger.warning("Gemini model %s failed; trying fallback: %s", model_name, exc)
  if last_error:raise last_error
  raise RuntimeError("No Gemini model is available")
 
