@@ -19,6 +19,7 @@ from starlette.middleware.sessions import SessionMiddleware
 import database
 
 load_dotenv(); os.environ["OAUTHLIB_INSECURE_TRANSPORT"]="1"
+logging.basicConfig(level=logging.INFO)
 WHATSAPP_TOKEN=os.getenv("WHATSAPP_TOKEN","")
 WHATSAPP_PHONE_NUMBER_ID=os.getenv("WHATSAPP_PHONE_NUMBER_ID","")
 WHATSAPP_VERIFY_TOKEN=os.getenv("WHATSAPP_VERIFY_TOKEN","zaikeban_verify_token")
@@ -56,7 +57,7 @@ def download_whatsapp_media(media_id: str) -> Optional[Image.Image]:
   return None
 CARD_STYLE="""<style>*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;background:linear-gradient(135deg,#fff8ed,#f1f7eb);font:16px system-ui,-apple-system,'Segoe UI',sans-serif;color:#233026}.card{width:min(100%,520px);padding:48px;border-radius:24px;background:#fff;box-shadow:0 18px 60px #263b2518;text-align:center}.leaf{font-size:2.5rem}h1{font-size:2.2rem;margin:.2em 0;color:#244b35}p{color:#667268;line-height:1.6}label{display:block;text-align:left;margin:18px 0 6px;color:#33443a;font-weight:600}input{width:100%;padding:14px;border:1px solid #dce5dc;border-radius:10px;font:inherit}.btn{display:inline-block;width:100%;margin-top:18px;padding:14px 24px;border:0;border-radius:12px;background:#2e7049;color:white;text-decoration:none;font:700 16px system-ui;cursor:pointer}.btn:hover{background:#245d3b}</style>"""
 SYSTEM_PROMPT='''Parse English, Hindi, and Hinglish business messages and images. Return ONLY a valid JSON array of objects, without markdown or explanatory text. Every object MUST have an "action" key set to exactly one of "ORDER", "STOCK_ADD", "EXPENSE", "INCOME", "QUERY_LIVE", "REPORT_OVERVIEW", "FETCH_PENDING", "UPDATE_ORDER_STATUS". Use these schemas and exact enum values:
-ORDER: {"action":"ORDER","name":string,"area":string,"amount":number,"source":"WhatsApp"|"Instagram"|"Direct","payment_status":"Done"|"Pending","payment_mode":"Bank"|"Cash","order_status":"Delivered"|"Pending","items":[{"flavour":"CC"|"SD"|"KD"|"RS"|"MP","grams":number}]}
+ORDER: {"action":"ORDER","name":string,"area":string,"amount":number,"source":"WhatsApp"|"Instagram"|"Direct","payment_status":"Done"|"Pending","payment_mode":"Bank"|"Cash"|"","order_status":"Delivered"|"Pending","items":[{"flavour":"CC"|"SD"|"KD"|"RS"|"MP","grams":number}]}
 STOCK_ADD: {"action":"STOCK_ADD","items":[{"flavour":"CC"|"SD"|"KD"|"RS"|"MP","grams":number}],"comments":string}
 EXPENSE: {"action":"EXPENSE","mode":"Bank"|"Cash","category":string,"amount":number,"comments":string}
 INCOME: {"action":"INCOME","mode":"Bank"|"Cash","category":string,"amount":number,"comments":string}
@@ -64,23 +65,31 @@ QUERY_LIVE: {"action":"QUERY_LIVE","target":"All"|"Bank"|"Cash"|"Stock"|"Both","
 REPORT_OVERVIEW: {"action":"REPORT_OVERVIEW","days":number}
 FETCH_PENDING: {"action":"FETCH_PENDING","filter":"Both"|"Payments"|"Orders"}
 UPDATE_ORDER_STATUS: {"action":"UPDATE_ORDER_STATUS","name":string,"payment_status":"Done"|"Pending","payment_mode":"Bank"|"Cash","order_status":"Delivered"|"Pending"}
-Flavour names map to codes as follows: CC = Choco Chip / Calcutta; SD = Saunf / Sweet; KD = Kesar Dryfruit; RS = Roasted / Rajwadi; MP = Meetha Paan. Accept either a two-letter code or its full name, and always output the two-letter code in uppercase. Convert every kg quantity to grams (1 kg = 1000 grams). Use positive numeric amounts and gram quantities. Do not invent missing facts. If a request cannot be confidently understood, return [].''' 
-MODEL=None
+Flavour names map to codes as follows: CC = Choco Chip / Calcutta; SD = Saunf / Sweet; KD = Kesar Dryfruit; RS = Roasted / Rajwadi; MP = Meetha Paan. Accept either a two-letter code or its full name, and always output the two-letter code in uppercase. Convert every kg quantity to grams (1 kg = 1000 grams). Use positive numeric amounts and gram quantities.
+For ORDER defaults, always fill omitted optional fields: area defaults to ""; source defaults to "WhatsApp"; payment_status defaults to "Done" if the user says paid/done or mentions UPI/GPay/online/cash payment, otherwise "Pending"; payment_mode is "Bank" for UPI/GPay/online/bank payment, "Cash" for cash payment, or "" when payment_status is "Pending" and no mode is mentioned; order_status defaults to "Delivered" if the user says delivered/sent/dispatched/done, otherwise "Pending". For STOCK_ADD, EXPENSE, and INCOME, comments defaults to "" when not mentioned. Always fill omitted optional fields using the defaults above instead of returning []. Only return [] if the message is completely unrelated to orders, stock, income, expenses, or business queries.''' 
 if os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"):
  genai.configure(api_key=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"))
- for m in ["models/gemini-2.5-flash","models/gemini-2.0-flash","models/gemini-1.5-flash"]:
-  try: MODEL=genai.GenerativeModel(m); MODEL.generate_content("OK"); break
-  except Exception: MODEL=None
+GEMINI_MODEL_NAMES=["models/gemini-2.5-flash","models/gemini-2.5-flash-lite","models/gemini-2.0-flash"]
+_GEMINI_MODELS={}
 
-def get_model():
- global MODEL
- if MODEL is None and (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")):
+def generate_ai_response(parts) -> str:
+ api_key=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+ if not api_key:raise RuntimeError("Gemini API key is not configured")
+ genai.configure(api_key=api_key)
+ last_error=None
+ for model_name in GEMINI_MODEL_NAMES:
   try:
-   genai.configure(api_key=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"))
-   MODEL=genai.GenerativeModel("models/gemini-2.5-flash")
-  except Exception:
-   logger.exception("Could not initialize Gemini model on demand")
- return MODEL
+   model=_GEMINI_MODELS.get(model_name)
+   if model is None:
+    model=genai.GenerativeModel(model_name)
+    _GEMINI_MODELS[model_name]=model
+   response=model.generate_content(parts)
+   return str(response.text or "")
+  except Exception as exc:
+   last_error=exc
+   logger.warning("Gemini model %s failed; trying fallback: %s",model_name,exc)
+ if last_error:raise last_error
+ raise RuntimeError("No Gemini model is available")
 
 def build_oauth_flow(redirect_uri,state=None):
  cid,secret=os.getenv("GOOGLE_CLIENT_ID"),os.getenv("GOOGLE_CLIENT_SECRET")
@@ -258,8 +267,7 @@ async def whatsapp(request:Request):
    logger.info("WhatsApp query=%r | raw=%s | reply=%s",body,raw,final_reply)
    send_whatsapp_message(sender,final_reply)
    continue
-  model=get_model()
-  if model is None:
+  if not (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")):
    final_reply="AI is not configured."
    logger.info("WhatsApp query=%r | raw=%s | reply=%s",body,raw,final_reply)
    send_whatsapp_message(sender,final_reply)
@@ -270,7 +278,7 @@ async def whatsapp(request:Request):
     image=download_whatsapp_media((msg.get("image") or {}).get("id"))
    parts=[SYSTEM_PROMPT+"\n"+str(body or "")]
    if image is not None:parts.append(image)
-   raw=model.generate_content(parts).text.strip()
+   raw=generate_ai_response(parts).strip()
    raw=re.sub(r"^```(?:json)?|```$","",raw,flags=re.I|re.M).strip()
    actions=json.loads(raw)
    if not isinstance(actions,list):raise ValueError("Expected action array")
