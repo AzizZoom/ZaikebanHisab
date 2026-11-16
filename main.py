@@ -34,7 +34,8 @@ def send_whatsapp_message(to_number: str, text: str):
  clean_to=re.sub(r"\D","",str(to_number or "").replace("whatsapp:",""))
  url=f"https://graph.facebook.com/{GRAPH_API_VERSION}/{WHATSAPP_PHONE_NUMBER_ID}/messages"
  try:
-  response=requests.post(url,headers={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"},json={"messaging_product":"whatsapp","recipient_type":"individual","to":clean_to,"type":"text","text":{"preview_url":False,"body":text}},timeout=15)
+  body_text=str(text or "").strip() or "Please clarify the request."
+  response=requests.post(url,headers={"Authorization":f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"},json={"messaging_product":"whatsapp","recipient_type":"individual","to":clean_to,"type":"text","text":{"preview_url":False,"body":body_text}},timeout=15)
   if response.status_code!=200:logger.error("WhatsApp Cloud API returned %s: %s",response.status_code,response.text)
   return response
  except requests.RequestException:
@@ -54,13 +55,32 @@ def download_whatsapp_media(media_id: str) -> Optional[Image.Image]:
   logger.exception("Failed to download WhatsApp media %s",media_id)
   return None
 CARD_STYLE="""<style>*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;background:linear-gradient(135deg,#fff8ed,#f1f7eb);font:16px system-ui,-apple-system,'Segoe UI',sans-serif;color:#233026}.card{width:min(100%,520px);padding:48px;border-radius:24px;background:#fff;box-shadow:0 18px 60px #263b2518;text-align:center}.leaf{font-size:2.5rem}h1{font-size:2.2rem;margin:.2em 0;color:#244b35}p{color:#667268;line-height:1.6}label{display:block;text-align:left;margin:18px 0 6px;color:#33443a;font-weight:600}input{width:100%;padding:14px;border:1px solid #dce5dc;border-radius:10px;font:inherit}.btn{display:inline-block;width:100%;margin-top:18px;padding:14px 24px;border:0;border-radius:12px;background:#2e7049;color:white;text-decoration:none;font:700 16px system-ui;cursor:pointer}.btn:hover{background:#245d3b}</style>"""
-SYSTEM_PROMPT='''Parse English, Hindi and Hinglish business messages/images. Return ONLY JSON array. Actions: ORDER {name,area,amount,source,payment_status,payment_mode,order_status,items:[{flavour,grams}]}; STOCK_ADD {items:[{flavour,grams}],comments}; EXPENSE/INCOME {mode,category,amount,comments}; QUERY_LIVE {target,flavour}; REPORT_OVERVIEW {days}; FETCH_PENDING {filter}; UPDATE_ORDER_STATUS {name,payment_status,payment_mode,order_status}. Valid flavours CC SD KD RS MP. Convert kg to grams. Never invent missing data; return [] if unclear.''' 
+SYSTEM_PROMPT='''Parse English, Hindi, and Hinglish business messages and images. Return ONLY a valid JSON array of objects, without markdown or explanatory text. Every object MUST have an "action" key set to exactly one of "ORDER", "STOCK_ADD", "EXPENSE", "INCOME", "QUERY_LIVE", "REPORT_OVERVIEW", "FETCH_PENDING", "UPDATE_ORDER_STATUS". Use these schemas and exact enum values:
+ORDER: {"action":"ORDER","name":string,"area":string,"amount":number,"source":"WhatsApp"|"Instagram"|"Direct","payment_status":"Done"|"Pending","payment_mode":"Bank"|"Cash","order_status":"Delivered"|"Pending","items":[{"flavour":"CC"|"SD"|"KD"|"RS"|"MP","grams":number}]}
+STOCK_ADD: {"action":"STOCK_ADD","items":[{"flavour":"CC"|"SD"|"KD"|"RS"|"MP","grams":number}],"comments":string}
+EXPENSE: {"action":"EXPENSE","mode":"Bank"|"Cash","category":string,"amount":number,"comments":string}
+INCOME: {"action":"INCOME","mode":"Bank"|"Cash","category":string,"amount":number,"comments":string}
+QUERY_LIVE: {"action":"QUERY_LIVE","target":"All"|"Bank"|"Cash"|"Stock"|"Both","flavour":"ALL"|"CC"|"SD"|"KD"|"RS"|"MP"}. Use target "All" whenever the user requests multiple kinds of information such as bank, cash, and stock; combine the request into one QUERY_LIVE action.
+REPORT_OVERVIEW: {"action":"REPORT_OVERVIEW","days":number}
+FETCH_PENDING: {"action":"FETCH_PENDING","filter":"Both"|"Payments"|"Orders"}
+UPDATE_ORDER_STATUS: {"action":"UPDATE_ORDER_STATUS","name":string,"payment_status":"Done"|"Pending","payment_mode":"Bank"|"Cash","order_status":"Delivered"|"Pending"}
+Flavour names map to codes as follows: CC = Choco Chip / Calcutta; SD = Saunf / Sweet; KD = Kesar Dryfruit; RS = Roasted / Rajwadi; MP = Meetha Paan. Accept either a two-letter code or its full name, and always output the two-letter code in uppercase. Convert every kg quantity to grams (1 kg = 1000 grams). Use positive numeric amounts and gram quantities. Do not invent missing facts. If a request cannot be confidently understood, return [].''' 
 MODEL=None
 if os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"):
  genai.configure(api_key=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"))
  for m in ["models/gemini-2.5-flash","models/gemini-2.0-flash","models/gemini-1.5-flash"]:
   try: MODEL=genai.GenerativeModel(m); MODEL.generate_content("OK"); break
   except Exception: MODEL=None
+
+def get_model():
+ global MODEL
+ if MODEL is None and (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")):
+  try:
+   genai.configure(api_key=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"))
+   MODEL=genai.GenerativeModel("models/gemini-2.5-flash")
+  except Exception:
+   logger.exception("Could not initialize Gemini model on demand")
+ return MODEL
 
 def build_oauth_flow(redirect_uri,state=None):
  cid,secret=os.getenv("GOOGLE_CLIENT_ID"),os.getenv("GOOGLE_CLIENT_SECRET")
@@ -110,7 +130,8 @@ def with_stock_alerts(reply,stock):
  alerts=stock_alerts(stock)
  return f"{reply}\n{alerts}" if alerts else reply
 def ledger(book,mode,kind,category,amount,comment=""):
- if mode not in ("Bank","Cash"):mode="Bank" if str(mode).lower() in ("upi","gpay") else "Cash"
+ m=str(mode or "").strip().lower()
+ mode="Bank" if ("bank" in m or m in ("upi","gpay","online","neft","imps","paytm","phonepe","card","account")) else "Cash"
  sh=ws(book,mode);n=len(sh.get_all_values())+1;now=datetime.now();amt=abs(float(amount));final=amt if kind=="Credit" else -amt;formula=f"=G{n}" if n<=3 else f"=H{n-1}+G{n}"
  sh.append_row([now.year,now.strftime("%b"),now.day,kind,category,amt,final,formula,comment],value_input_option="USER_ENTERED")
 def live(book,tab):
@@ -124,42 +145,52 @@ def money(r,k="Amount"):
  try:return float(str(r.get(k,0)).replace(",",""))
  except:return 0
 def act(book,a):
- k=a.get("action","").upper()
+ a=a if isinstance(a,dict) else {}
+ k=str(a.get("action") or a.get("type") or "").strip().upper()
+ if k=="DEBIT":k="EXPENSE"
+ elif k=="CREDIT":k="INCOME"
  if k=="ORDER":
-  s=stock_get(book);items=a.get("items",[]);details=[]
+  payment_status="Done" if str(a.get("payment_status") or "").strip().lower() in ("done","paid","completed","received","yes") else "Pending"
+  order_status="Delivered" if str(a.get("order_status") or "").strip().lower() in ("delivered","done","completed","dispatched","sent","yes") else "Pending"
+  s=stock_get(book);items=a.get("items") or [];details=[]
   for it in items:
-   f=it.get("flavour","").upper();g=int(it.get("grams",0))
+   it=it if isinstance(it,dict) else {};f=str(it.get("flavour") or "").strip().upper();g=int(float(it.get("grams") or 0))
    if f not in FLAVOURS or g<=0:raise ValueError("Invalid item")
    s[f]-=g;details.append(f"{g}g {f}")
-  stock_set(book,s);n=datetime.now();ws(book,"Orders").append_row([n.year,n.strftime("%b"),n.day,a.get("name",""),a.get("area",""),float(a.get("amount",0)),a.get("source","WhatsApp"),a.get("payment_status","Pending"),a.get("order_status","Pending"),", ".join(details)],value_input_option="USER_ENTERED")
-  amt=float(a.get("amount",0))
-  if a.get("payment_status")=="Done" and amt>0:ledger(book,a.get("payment_mode","Cash"),"Credit","Order",amt,"Order from "+a.get("name",""))
+  stock_set(book,s);n=datetime.now();name=str(a.get("name") or "");ws(book,"Orders").append_row([n.year,n.strftime("%b"),n.day,name,a.get("area") or "",float(a.get("amount") or 0),a.get("source") or "WhatsApp",payment_status,order_status,", ".join(details)],value_input_option="USER_ENTERED")
+  amt=float(a.get("amount") or 0)
+  if payment_status=="Done" and amt>0:ledger(book,a.get("payment_mode"),"Credit","Order",amt,"Order from "+name)
   return with_stock_alerts("Order saved. Live stock: "+", ".join(f"{f} {max(0,s[f])}g" for f in FLAVOURS),s)
  if k=="STOCK_ADD":
   s=stock_get(book)
-  for it in a.get("items",[]):
-   f=it.get("flavour","").upper();g=int(it.get("grams",0))
+  for it in (a.get("items") or []):
+   it=it if isinstance(it,dict) else {};f=str(it.get("flavour") or "").strip().upper();g=int(float(it.get("grams") or 0))
    if f not in FLAVOURS or g<=0:raise ValueError("Invalid stock item")
    s[f]+=g
   stock_set(book,s);return with_stock_alerts("Stock: "+", ".join(f"{f} {v}g" for f,v in s.items()),s)
- if k in ("EXPENSE","INCOME"):ledger(book,a.get("mode","Cash"),"Debit" if k=="EXPENSE" else "Credit",a.get("category",k),a["amount"],a.get("comments",""));return f"{k.title()} ₹{float(a['amount']):,.2f} saved."
+ if k in ("EXPENSE","INCOME"):
+  amt=float(a.get("amount") or 0);cat=str(a.get("category") or k.title());ledger(book,a.get("mode"),"Debit" if k=="EXPENSE" else "Credit",cat,amt,a.get("comments") or "");return f"{k.title()} ₹{amt:,.2f} saved."
  if k=="QUERY_LIVE":
-  t=a.get("target","All");out=[]
-  if t in ("Bank","Both","All"):out.append(f"Bank ₹{live(book,'Bank'):,.2f}")
-  if t in ("Cash","Both","All"):out.append(f"Cash ₹{live(book,'Cash'):,.2f}")
+  t=str(a.get("target") or "all").strip().lower();f=str(a.get("flavour") or "ALL").strip().upper();out=[]
+  if t in ("all","both","") or "bank" in t:out.append(f"Bank ₹{live(book,'Bank'):,.2f}")
+  if t in ("all","both","") or "cash" in t:out.append(f"Cash ₹{live(book,'Cash'):,.2f}")
   s=None
-  if t in ("Stock","All"):
-   s=stock_get(book);f=a.get("flavour","ALL").upper();out.append("Stock "+", ".join(f"{x}: {v}g" for x,v in s.items() if f in ("ALL",x)))
+  if t in ("all","") or "stock" in t or "mukhwas" in t or f in FLAVOURS:
+   s=stock_get(book);out.append("Stock "+", ".join(f"{x}: {v}g" for x,v in s.items() if f in ("ALL",x)))
+  if not out:
+   out.append(f"Bank ₹{live(book,'Bank'):,.2f}");out.append(f"Cash ₹{live(book,'Cash'):,.2f}");s=stock_get(book);out.append("Stock "+", ".join(f"{x}: {v}g" for x,v in s.items() if f in ("ALL",x)))
   reply=" | ".join(out)
   return with_stock_alerts(reply,s) if s is not None else reply
  if k=="FETCH_PENDING":
-  f=a.get("filter","Both");found=[]
+  f=str(a.get("filter") or "both").strip().lower();want_pay=f in ("both","all","") or "pay" in f;want_ord=f in ("both","all","") or "order" in f or "deliver" in f
+  if not want_pay and not want_ord:want_pay=True;want_ord=True
+  found=[]
   for r in rows(book,"Orders"):
-   p=r.get("Payment status","").lower()=="pending";d=r.get("Order status","").lower()=="pending"
-   if (f in ("Payments","Both") and p) or (f in ("Orders","Both") and d):found.append(f"{len(found)+1}. {r.get('Name')} ({r.get('Area')}) ₹{money(r):,.0f} {r.get('Year')}-{r.get('Month')}-{r.get('Date')} {r.get('Order details')} — payment {'Pending' if p else 'Done'}, order {'Pending' if d else 'Delivered'}")
+   p=str(r.get("Payment status") or "").strip().lower()=="pending";d=str(r.get("Order status") or "").strip().lower()=="pending"
+   if (want_pay and p) or (want_ord and d):found.append(f"{len(found)+1}. {r.get('Name')} ({r.get('Area')}) ₹{money(r):,.0f} {r.get('Year')}-{r.get('Month')}-{r.get('Date')} {r.get('Order details')} — payment {'Pending' if p else 'Done'}, order {'Pending' if d else 'Delivered'}")
   return "\n".join(found) if found else "No pending items."
  if k=="REPORT_OVERVIEW":
-  cutoff=datetime.now().date().toordinal()-int(a.get("days",30));o=[];tx={x:[] for x in ["Bank","Cash"]}
+  days=int(float(a.get("days") or 30));cutoff=datetime.now().date().toordinal()-days;o=[];tx={x:[] for x in ["Bank","Cash"]}
   def recent(r):
    try:return datetime(int(float(r['Year'])),datetime.strptime(r['Month'],'%b').month,int(float(r['Date']))).date().toordinal()>=cutoff
    except:return False
@@ -173,11 +204,13 @@ def act(book,a):
   current_stock=stock_get(book)
   o.append("Sold: "+", ".join(f"{f} {n}g" for f,n in sold.items())+f" (total {sum(sold.values())}g). Stock: "+", ".join(f"{f} {v}g" for f,v in current_stock.items()));return with_stock_alerts("\n".join(o),current_stock)
  if k=="UPDATE_ORDER_STATUS":
-  sh=ws(book,"Orders");v=sh.get_all_values();count=0
+  req_paid=str(a.get("payment_status") or "").strip().lower() in ("done","paid","completed","received")
+  req_deliv=str(a.get("order_status") or "").strip().lower() in ("delivered","done","completed","dispatched")
+  sh=ws(book,"Orders");v=sh.get_all_values();count=0;target_name=str(a.get("name") or "").strip().lower()
   for i,r in enumerate(v[1:],2):
-   if len(r)<10 or r[3].strip().lower()!=str(a.get("name","")).strip().lower():continue
-   paid=a.get("payment_status")=="Done" and r[7].lower()=="pending";delivered=a.get("order_status")=="Delivered" and r[8].lower()=="pending"
-   if paid:sh.update_cell(i,8,"Done");ledger(book,a.get("payment_mode","Cash"),"Credit","Order",money({"Amount":r[5]}),"Order from "+r[3])
+   if len(r)<10 or str(r[3] or "").strip().lower()!=target_name:continue
+   paid=req_paid and str(r[7] or "").strip().lower()=="pending";delivered=req_deliv and str(r[8] or "").strip().lower()=="pending"
+   if paid:sh.update_cell(i,8,"Done");ledger(book,a.get("payment_mode"),"Credit","Order",money({"Amount":r[5]}),"Order from "+str(r[3] or ""))
    if delivered:sh.update_cell(i,9,"Delivered")
    count+=bool(paid or delivered)
   return f"Updated {count} order(s)." if count else "No matching pending order."
@@ -213,41 +246,47 @@ async def whatsapp(request:Request):
   processed+=1
   sender=str(msg.get("from",""))
   if not sender:continue
+  msg_type=msg.get("type")
+  body=(msg.get("text") or {}).get("body","") if msg_type=="text" else (msg.get("image") or {}).get("caption","") if msg_type=="image" else ""
+  raw=""
   user=database.get_user_by_phone(sender)
   sender_digits=re.sub(r"\D","",sender)
   if user is None and admin_digits and sender_digits[-10:]==admin_digits:
    user=database.get_any_authenticated_user()
   if user is None:
    final_reply="Number not linked. Please connect it in the web app."
+   logger.info("WhatsApp query=%r | raw=%s | reply=%s",body,raw,final_reply)
    send_whatsapp_message(sender,final_reply)
    continue
-  if MODEL is None:
-   send_whatsapp_message(sender,"AI is not configured.")
+  model=get_model()
+  if model is None:
+   final_reply="AI is not configured."
+   logger.info("WhatsApp query=%r | raw=%s | reply=%s",body,raw,final_reply)
+   send_whatsapp_message(sender,final_reply)
    continue
   try:
-   msg_type=msg.get("type")
    image=None
-   if msg_type=="text":
-    body=msg.get("text",{}).get("body","")
-   elif msg_type=="image":
-    body=msg.get("image",{}).get("caption","")
-    image=download_whatsapp_media(msg.get("image",{}).get("id"))
-   else:
-    body=""
-   parts=[SYSTEM_PROMPT+"\n"+body]
+   if msg_type=="image":
+    image=download_whatsapp_media((msg.get("image") or {}).get("id"))
+   parts=[SYSTEM_PROMPT+"\n"+str(body or "")]
    if image is not None:parts.append(image)
-   raw=MODEL.generate_content(parts).text.strip()
+   raw=model.generate_content(parts).text.strip()
    raw=re.sub(r"^```(?:json)?|```$","",raw,flags=re.I|re.M).strip()
    actions=json.loads(raw)
    if not isinstance(actions,list):raise ValueError("Expected action array")
    book=book_for(user);out=[]
    for action in actions:
-    try:out.append(act(book,action))
-    except Exception as exc:out.append(f"Could not process action: {exc}")
-   final_reply="\n\n".join(out) if out else "Please clarify the request."
+    try:
+     res=act(book,action)
+     if res and str(res).strip() and str(res).strip() not in out:out.append(str(res).strip())
+    except Exception as exc:
+     res=f"Could not process action: {exc}"
+     if res.strip() and res.strip() not in out:out.append(res.strip())
+   final_reply="\n\n".join(out).strip() if out else "Please clarify the request."
   except Exception:
    logger.exception("Failed to process incoming WhatsApp message")
    final_reply="Sorry, couldn't process that. Please try again with clear details."
+  logger.info("WhatsApp query=%r | raw=%s | reply=%s",body,raw,final_reply)
   send_whatsapp_message(sender,final_reply)
  if processed==0:return JSONResponse({"status":"ignored"},status_code=200)
  return JSONResponse({"status":"ok"},status_code=200)
