@@ -55,18 +55,33 @@ def download_whatsapp_media(media_id: str) -> Optional[Image.Image]:
  except Exception:
   logger.exception("Failed to download WhatsApp media %s",media_id)
   return None
+
 CARD_STYLE="""<style>*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;background:linear-gradient(135deg,#fff8ed,#f1f7eb);font:16px system-ui,-apple-system,'Segoe UI',sans-serif;color:#233026}.card{width:min(100%,520px);padding:48px;border-radius:24px;background:#fff;box-shadow:0 18px 60px #263b2518;text-align:center}.leaf{font-size:2.5rem}h1{font-size:2.2rem;margin:.2em 0;color:#244b35}p{color:#667268;line-height:1.6}label{display:block;text-align:left;margin:18px 0 6px;color:#33443a;font-weight:600}input{width:100%;padding:14px;border:1px solid #dce5dc;border-radius:10px;font:inherit}.btn{display:inline-block;width:100%;margin-top:18px;padding:14px 24px;border:0;border-radius:12px;background:#2e7049;color:white;text-decoration:none;font:700 16px system-ui;cursor:pointer}.btn:hover{background:#245d3b}</style>"""
+
 SYSTEM_PROMPT='''Parse English, Hindi, and Hinglish business messages and images. Return ONLY a valid JSON array of objects, without markdown or explanatory text. Every object MUST have an "action" key set to exactly one of "ORDER", "STOCK_ADD", "EXPENSE", "INCOME", "QUERY_LIVE", "REPORT_OVERVIEW", "FETCH_PENDING", "UPDATE_ORDER_STATUS". Use these schemas and exact enum values:
 ORDER: {"action":"ORDER","name":string,"area":string,"amount":number,"source":"WhatsApp"|"Instagram"|"Direct","payment_status":"Done"|"Pending","payment_mode":"Bank"|"Cash"|"","order_status":"Delivered"|"Pending","items":[{"flavour":"CC"|"SD"|"KD"|"RS"|"MP","grams":number}]}
 STOCK_ADD: {"action":"STOCK_ADD","items":[{"flavour":"CC"|"SD"|"KD"|"RS"|"MP","grams":number}],"comments":string}
-EXPENSE: {"action":"EXPENSE","mode":"Bank"|"Cash","category":string,"amount":number,"comments":string}
-INCOME: {"action":"INCOME","mode":"Bank"|"Cash","category":string,"amount":number,"comments":string}
+EXPENSE: {"action":"EXPENSE","mode":"Bank"|"Cash"|"","category":string,"amount":number,"comments":string}
+INCOME: {"action":"INCOME","mode":"Bank"|"Cash"|"","category":string,"amount":number,"comments":string}
 QUERY_LIVE: {"action":"QUERY_LIVE","target":"All"|"Bank"|"Cash"|"Stock"|"Both","flavour":"ALL"|"CC"|"SD"|"KD"|"RS"|"MP"}. Use target "All" whenever the user requests multiple kinds of information such as bank, cash, and stock; combine the request into one QUERY_LIVE action.
 REPORT_OVERVIEW: {"action":"REPORT_OVERVIEW","days":number}
 FETCH_PENDING: {"action":"FETCH_PENDING","filter":"Both"|"Payments"|"Orders"}
-UPDATE_ORDER_STATUS: {"action":"UPDATE_ORDER_STATUS","name":string,"payment_status":"Done"|"Pending","payment_mode":"Bank"|"Cash","order_status":"Delivered"|"Pending"}
+UPDATE_ORDER_STATUS: {"action":"UPDATE_ORDER_STATUS","name":string,"payment_status":"Done"|"Pending","payment_mode":"Bank"|"Cash"|"","order_status":"Delivered"|"Pending"}
+
 Flavour names map to codes as follows: CC = Choco Chip / Calcutta; SD = Saunf / Sweet; KD = Kesar Dryfruit; RS = Roasted / Rajwadi; MP = Meetha Paan. Accept either a two-letter code or its full name, and always output the two-letter code in uppercase. Convert every kg quantity to grams (1 kg = 1000 grams). Use positive numeric amounts and gram quantities.
-For ORDER defaults, always fill omitted optional fields: area defaults to ""; source defaults to "WhatsApp"; payment_status defaults to "Done" if the user says paid/done or mentions UPI/GPay/online/cash payment, otherwise "Pending"; payment_mode is "Bank" for UPI/GPay/online/bank payment, "Cash" for cash payment, or "" when payment_status is "Pending" and no mode is mentioned; order_status defaults to "Delivered" if the user says delivered/sent/dispatched/done, otherwise "Pending". For STOCK_ADD, EXPENSE, and INCOME, comments defaults to "" when not mentioned. Always fill omitted optional fields using the defaults above instead of returning []. Only return [] if the message is completely unrelated to orders, stock, income, expenses, or business queries.''' 
+
+DEFAULT RULES FOR OPTIONAL FIELDS:
+- area: default to "" if not mentioned.
+- source: default to "WhatsApp" if not mentioned.
+- payment_status: set to "Done" if the user says paid/done/received/completed or mentions a payment method; otherwise default to "Pending".
+- order_status: set to "Delivered" if the user says delivered/sent/dispatched/done; otherwise default to "Pending".
+- comments: default to "" when not mentioned.
+
+CRITICAL PAYMENT MODE RULE:
+Set "payment_mode" or "mode" to "Bank" ONLY if the user explicitly mentions bank, UPI, GPay, Google Pay, PhonePe, Paytm, online, NEFT, IMPS, cheque, or card. Set it to "Cash" ONLY if the user explicitly mentions cash. If the user does NOT explicitly mention how the payment was made or received, you MUST set "payment_mode" / "mode" to "" (empty string) — NEVER guess or default to "Cash" or "Bank".
+
+Always fill omitted optional fields using the defaults above instead of returning []. Only return [] if the message is completely unrelated to orders, stock, income, expenses, or business queries.'''
+
 if os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"):
  genai.configure(api_key=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"))
 GEMINI_MODEL_NAMES=["models/gemini-2.5-flash","models/gemini-2.5-flash-lite","models/gemini-2.0-flash"]
@@ -95,28 +110,35 @@ def build_oauth_flow(redirect_uri,state=None):
  cid,secret=os.getenv("GOOGLE_CLIENT_ID"),os.getenv("GOOGLE_CLIENT_SECRET")
  if cid and secret:return Flow.from_client_config({"web":{"client_id":cid,"client_secret":secret,"auth_uri":"https://accounts.google.com/o/oauth2/auth","token_uri":"https://oauth2.googleapis.com/token"}},scopes=SCOPES,state=state,redirect_uri=redirect_uri)
  return Flow.from_client_secrets_file("client_secret.json",scopes=SCOPES,state=state,redirect_uri=redirect_uri)
+
 def get_user_client(user):
  creds=Credentials.from_authorized_user_info(json.loads(user["creds_json"]),SCOPES)
  if creds.expired and creds.refresh_token:creds.refresh(GoogleRequest());database.save_user(user["email"],creds.to_json(),user.get("sheet_id"))
  return gspread.authorize(creds)
+
 def book_for(user):
  gc=get_user_client(user)
  try:return gc.open(user.get("sheet_id") or os.getenv("SPREADSHEET_NAME","Zaikeban Foods Hisab"))
  except gspread.SpreadsheetNotFound:return database.initialize_user_sheet(gc,user["email"])
+
 @app.api_route("/",methods=["GET","HEAD"],response_class=HTMLResponse)
 async def home(request:Request):return templates.TemplateResponse(request=request,name="index.html")
+
 @app.get("/login")
 async def login(request:Request):
  uri=f"{request.headers.get('x-forwarded-proto','http')}://{request.headers.get('host')}/callback"; flow=build_oauth_flow(uri); url,state=flow.authorization_url(access_type="offline",prompt="consent"); request.session.update(state=state,code_verifier=flow.code_verifier,redirect_uri=uri); return RedirectResponse(url)
+
 @app.get("/callback")
 async def callback(request:Request):
  flow=build_oauth_flow(request.session.get("redirect_uri"),request.session.get("state")); flow.code_verifier=request.session.get("code_verifier"); flow.fetch_token(authorization_response=str(request.url)); r=requests.get("https://www.googleapis.com/userinfo/v2/me",headers={"Authorization":f"Bearer {flow.credentials.token}"},timeout=15);r.raise_for_status();email=r.json().get("email")
  if not email:raise HTTPException(400,"Google account email missing")
  database.save_user(email,flow.credentials.to_json());database.initialize_user_sheet(gspread.authorize(flow.credentials),email);request.session["email"]=email;return RedirectResponse("/onboard",303)
+
 @app.get("/onboard",response_class=HTMLResponse)
 async def onboard(request:Request):
  if not request.session.get("email"):return RedirectResponse("/login")
  return HTMLResponse(f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Connect WhatsApp · Zaikeban Foods Hisab</title>{CARD_STYLE}</head><body><main class="card"><div class="leaf">🌿</div><h1>Connect WhatsApp</h1><p>Link the phone number you use to message your Zaikeban Foods assistant.</p><form method="post" action="/save_phone"><label for="phone">WhatsApp phone number</label><input id="phone" name="phone" type="tel" placeholder="10 digit mobile number" required><button class="btn" type="submit">Save Phone Number</button></form></main></body></html>''')
+
 @app.post("/save_phone",response_class=HTMLResponse)
 async def save_phone(request:Request,phone:str=Form(...)):
  email=request.session.get("email")
@@ -138,11 +160,24 @@ def stock_alerts(stock):
 def with_stock_alerts(reply,stock):
  alerts=stock_alerts(stock)
  return f"{reply}\n{alerts}" if alerts else reply
+
+def resolve_payment_mode(raw_mode) -> Optional[str]:
+ m=str(raw_mode or "").strip().lower()
+ if not m or m in ("none","null","n/a","pending","unknown"):
+  return None
+ if "bank" in m or m in ("upi","gpay","google pay","online","neft","imps","paytm","phonepe","card","account","cheque","check"):
+  return "Bank"
+ if "cash" in m:
+  return "Cash"
+ return None
+
 def ledger(book,mode,kind,category,amount,comment=""):
- m=str(mode or "").strip().lower()
- mode="Bank" if ("bank" in m or m in ("upi","gpay","online","neft","imps","paytm","phonepe","card","account")) else "Cash"
- sh=ws(book,mode);n=len(sh.get_all_values())+1;now=datetime.now();amt=abs(float(amount));final=amt if kind=="Credit" else -amt;formula=f"=G{n}" if n<=3 else f"=H{n-1}+G{n}"
+ resolved_mode=resolve_payment_mode(mode)
+ if resolved_mode is None:
+  raise ValueError("Pls specify payment mode (Bank/UPI or Cash) and send the message again.")
+ sh=ws(book,resolved_mode);n=len(sh.get_all_values())+1;now=datetime.now();amt=abs(float(amount));final=amt if kind=="Credit" else -amt;formula=f"=G{n}" if n<=3 else f"=H{n-1}+G{n}"
  sh.append_row([now.year,now.strftime("%b"),now.day,kind,category,amt,final,formula,comment],value_input_option="USER_ENTERED")
+
 def live(book,tab):
  for x in reversed(ws(book,tab).col_values(8)[2:]):
   try:return float(x.replace(",",""))
@@ -153,6 +188,7 @@ def rows(book,tab):
 def money(r,k="Amount"):
  try:return float(str(r.get(k,0)).replace(",",""))
  except:return 0
+
 def act(book,a):
  a=a if isinstance(a,dict) else {}
  k=str(a.get("action") or a.get("type") or "").strip().upper()
@@ -161,15 +197,20 @@ def act(book,a):
  if k=="ORDER":
   payment_status="Done" if str(a.get("payment_status") or "").strip().lower() in ("done","paid","completed","received","yes") else "Pending"
   order_status="Delivered" if str(a.get("order_status") or "").strip().lower() in ("delivered","done","completed","dispatched","sent","yes") else "Pending"
+  amt=float(a.get("amount") or 0)
+  pmode=resolve_payment_mode(a.get("payment_mode") or a.get("mode"))
+  if payment_status=="Done" and pmode is None:
+   return "Pls specify payment mode (Bank/UPI or Cash) and send the message again."
   s=stock_get(book);items=a.get("items") or [];details=[]
   for it in items:
    it=it if isinstance(it,dict) else {};f=str(it.get("flavour") or "").strip().upper();g=int(float(it.get("grams") or 0))
    if f not in FLAVOURS or g<=0:raise ValueError("Invalid item")
    s[f]-=g;details.append(f"{g}g {f}")
-  stock_set(book,s);n=datetime.now();name=str(a.get("name") or "");ws(book,"Orders").append_row([n.year,n.strftime("%b"),n.day,name,a.get("area") or "",float(a.get("amount") or 0),a.get("source") or "WhatsApp",payment_status,order_status,", ".join(details)],value_input_option="USER_ENTERED")
-  amt=float(a.get("amount") or 0)
-  if payment_status=="Done" and amt>0:ledger(book,a.get("payment_mode"),"Credit","Order",amt,"Order from "+name)
-  return with_stock_alerts("Order saved. Live stock: "+", ".join(f"{f} {max(0,s[f])}g" for f in FLAVOURS),s)
+  stock_set(book,s);n=datetime.now();name=str(a.get("name") or "");ws(book,"Orders").append_row([n.year,n.strftime("%b"),n.day,name,a.get("area") or "",amt,a.get("source") or "WhatsApp",payment_status,order_status,", ".join(details)],value_input_option="USER_ENTERED")
+  if payment_status=="Done" and amt>0:
+   ledger(book,pmode,"Credit","Order",amt,"Order from "+name)
+   return with_stock_alerts(f"Order saved (Payment ₹{amt:,.2f} added to {pmode} hisab). Live stock: "+", ".join(f"{f} {max(0,s[f])}g" for f in FLAVOURS),s)
+  return with_stock_alerts("Order saved (Payment: Pending). Live stock: "+", ".join(f"{f} {max(0,s[f])}g" for f in FLAVOURS),s)
  if k=="STOCK_ADD":
   s=stock_get(book)
   for it in (a.get("items") or []):
@@ -178,7 +219,10 @@ def act(book,a):
    s[f]+=g
   stock_set(book,s);return with_stock_alerts("Stock: "+", ".join(f"{f} {v}g" for f,v in s.items()),s)
  if k in ("EXPENSE","INCOME"):
-  amt=float(a.get("amount") or 0);cat=str(a.get("category") or k.title());ledger(book,a.get("mode"),"Debit" if k=="EXPENSE" else "Credit",cat,amt,a.get("comments") or "");return f"{k.title()} ₹{amt:,.2f} saved."
+  pmode=resolve_payment_mode(a.get("mode") or a.get("payment_mode"))
+  if pmode is None:
+   return "Pls specify payment mode (Bank/UPI or Cash) and send the message again."
+  amt=float(a.get("amount") or 0);cat=str(a.get("category") or k.title());ledger(book,pmode,"Debit" if k=="EXPENSE" else "Credit",cat,amt,a.get("comments") or "");return f"{k.title()} ₹{amt:,.2f} saved in {pmode} hisab."
  if k=="QUERY_LIVE":
   t=str(a.get("target") or "all").strip().lower();f=str(a.get("flavour") or "ALL").strip().upper();out=[]
   if t in ("all","both","") or "bank" in t:out.append(f"Bank ₹{live(book,'Bank'):,.2f}")
@@ -213,16 +257,24 @@ def act(book,a):
   current_stock=stock_get(book)
   o.append("Sold: "+", ".join(f"{f} {n}g" for f,n in sold.items())+f" (total {sum(sold.values())}g). Stock: "+", ".join(f"{f} {v}g" for f,v in current_stock.items()));return with_stock_alerts("\n".join(o),current_stock)
  if k=="UPDATE_ORDER_STATUS":
-  req_paid=str(a.get("payment_status") or "").strip().lower() in ("done","paid","completed","received")
-  req_deliv=str(a.get("order_status") or "").strip().lower() in ("delivered","done","completed","dispatched")
-  sh=ws(book,"Orders");v=sh.get_all_values();count=0;target_name=str(a.get("name") or "").strip().lower()
+  req_paid=str(a.get("payment_status") or "").strip().lower() in ("done","paid","completed","received","yes")
+  req_deliv=str(a.get("order_status") or "").strip().lower() in ("delivered","done","completed","dispatched","sent","yes")
+  pmode=resolve_payment_mode(a.get("payment_mode") or a.get("mode"))
+  if req_paid and pmode is None:
+   return "Pls specify payment mode (Bank/UPI or Cash) and send the message again."
+  sh=ws(book,"Orders");v=sh.get_all_values();count=0;total_paid=0.0;target_name=str(a.get("name") or "").strip().lower()
   for i,r in enumerate(v[1:],2):
    if len(r)<10 or str(r[3] or "").strip().lower()!=target_name:continue
    paid=req_paid and str(r[7] or "").strip().lower()=="pending";delivered=req_deliv and str(r[8] or "").strip().lower()=="pending"
-   if paid:sh.update_cell(i,8,"Done");ledger(book,a.get("payment_mode"),"Credit","Order",money({"Amount":r[5]}),"Order from "+str(r[3] or ""))
+   if paid:
+    row_amt=money({"Amount":r[5]})
+    sh.update_cell(i,8,"Done");ledger(book,pmode,"Credit","Order",row_amt,"Order from "+str(r[3] or ""))
+    total_paid+=row_amt
    if delivered:sh.update_cell(i,9,"Delivered")
    count+=bool(paid or delivered)
-  return f"Updated {count} order(s)." if count else "No matching pending order."
+  if not count:return "No matching pending order."
+  if total_paid>0:return f"Updated {count} order(s). Payment ₹{total_paid:,.2f} added to {pmode} hisab."
+  return f"Updated {count} order(s) (Order marked Delivered)."
  return "Unsupported action."
 
 @app.get("/whatsapp")
