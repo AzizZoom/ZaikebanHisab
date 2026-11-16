@@ -19,7 +19,6 @@ from starlette.middleware.sessions import SessionMiddleware
 import database
 
 load_dotenv(); os.environ["OAUTHLIB_INSECURE_TRANSPORT"]="1"
-logging.basicConfig(level=logging.INFO)
 WHATSAPP_TOKEN=os.getenv("WHATSAPP_TOKEN","")
 WHATSAPP_PHONE_NUMBER_ID=os.getenv("WHATSAPP_PHONE_NUMBER_ID","")
 WHATSAPP_VERIFY_TOKEN=os.getenv("WHATSAPP_VERIFY_TOKEN","zaikeban_verify_token")
@@ -316,12 +315,10 @@ async def whatsapp(request:Request):
    user=database.get_any_authenticated_user()
   if user is None:
    final_reply="Number not linked. Please connect it in the web app."
-   logger.info("WhatsApp query=%r | raw=%s | reply=%s",body,raw,final_reply)
    send_whatsapp_message(sender,final_reply)
    continue
   if not (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")):
    final_reply="AI is not configured."
-   logger.info("WhatsApp query=%r | raw=%s | reply=%s",body,raw,final_reply)
    send_whatsapp_message(sender,final_reply)
    continue
   try:
@@ -346,7 +343,6 @@ async def whatsapp(request:Request):
   except Exception:
    logger.exception("Failed to process incoming WhatsApp message")
    final_reply="Sorry, couldn't process that. Please try again with clear details."
-  logger.info("WhatsApp query=%r | raw=%s | reply=%s",body,raw,final_reply)
   send_whatsapp_message(sender,final_reply)
  if processed==0:return JSONResponse({"status":"ignored"},status_code=200)
  return JSONResponse({"status":"ok"},status_code=200)
